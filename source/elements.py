@@ -3,6 +3,13 @@ from functools import reduce
 import matplotlib.pyplot as plt
 
 
+def multMatrices2x2(matrices):
+    sys_matrix = np.eye(2)  # Start mit Identitätsmatrix
+    for mat in matrices:
+        sys_matrix = np.dot(sys_matrix, mat)  # Matrixmultiplikation
+    return sys_matrix
+
+
 class phsyConst():
     def __init__(self):
         self.rho = 1.205
@@ -17,7 +24,6 @@ class Zweitor():
         self.Z = Z
         self.type = type
         
-    
     def matrix(self, w):
         Z_w = self.Z(w) if callable(self.Z) else self.Z  # Z(w), falls Z frequenzabhängig ist
         if self.type == "laengs":
@@ -49,17 +55,72 @@ class mechAcoustTransf():
         return self._mat
         
 
+class AcousticVolume(phsyConst, Zweitor):
+    def __init__(self, V):
+        phsyConst.__init__(self)
+        self.V = V * 1e-3 # Liter to m3
+        Na = V / (self.rho * self.c**2)
+        Zweitor.__init__(self, lambda w : 1/(1j*w*Na), "quer")
+
+
+class AcousticPort(phsyConst, Zweitor):
+    def __init__(self, r, l, type="tube",  corr="wall"):
+        '''
+        r : floar
+        Radious of port, if square port is used, then r is half the height/width
+        '''
+        phsyConst.__init__(self)
+        match type:
+            case "tube":
+                a = r
+                self.S = np.pi * a * 2
+                xi = (8*self.mu)/a**2
+                match corr:
+                    case "wall":
+                        deltal = (8/(3*np.pi)) * a
+                    case "freeair":
+                        deltal = 0.6 * a
+            case "square":
+                h = r*2
+                self.S = h*2
+                xi = (12*self.mu)/self.S
+                deltal = 0
+        lstar = l + deltal
+        self.Ma = (self.rho * lstar) / self.S
+        self.Za = (xi * lstar) / self.S
+        # coumpling to large volume basically no effect, thus not considered
+        Zweitor.__init__(self, lambda w : 1j*w*self.Ma + self.Za, "laengs")
+
+
+class PortedBox(AcousticVolume, AcousticPort):
+    def __init__(self, V, r, l, type="tube", corr="wall"):
+        self.encl = AcousticVolume(V)
+        self.port = AcousticPort(r, l, type, corr)
+        self.sf = SoundField(self.port.S)
+    
+    def calculateSystem(self, w):
+        # matrices = [self.encl.matrix(w), 
+        #             self.port.matrix(w)]
+        # return multMatrices2x2(matrices)
+        mat1, mat2 = self.encl.matrix(w), self.port.matrix(w)
+        return np.matmul(mat1, mat2)
+    
+    def calculateLoad(self, w):
+        ZsS = self.sf.calculateLoad(w)
+        #load = 1 /((1/self.encl.Z(w))+(1/(self.port.Z(w)+ZsS)))
+        return ZsS
+
+
 class SoundField(phsyConst):
     def __init__(self, S):
         super().__init__()
         self.S = S
         self.a = np.sqrt(S/np.pi)
     
-    def getLoad(self, w):
+    def calculateLoad(self, w):
         k = w / self.c
-        #self.Zs = self.rho*self.c*((0.5*(k*self.a)**2) + (1j*(8/(3*np.pi))*k*self.a))      # false
-        self.Zs = self.rho*self.c*((0.06*(k*self.a)**4) + (1j*(8/(3*np.pi))*k*self.a))    # full function
-        #self.Zs = self.rho*self.c*(1j*(8/(3*np.pi))*k*self.a)      # ka<<1
+        # elf.Zs = self.rho*self.c*((0.5*(k*self.a)**2) + (1j*(8/(3*np.pi))*k*self.a))      # Kolben in Schallwand
+        self.Zs = self.rho*self.c*((0.06*(k*self.a)**4) + (1j*(8/(3*np.pi))*k*self.a))    # Kreisplatte in free air
         self.Z = self.Zs / self.S
         return self.Z
 
@@ -79,21 +140,11 @@ class ElecDynSpeaker(phsyConst, elecMechTransf):
         self.RMS = TSParams["Rms"]
         self.CMS = TSParams["Cms"] * 1e-3
         self.BL = TSParams["Bl"]
-        
         self.CMES = self.MMS / (self.BL)**2
         self.LCES = (self.BL**2) / self.SD
         self.RES = self.BL**2 / self.RE
         self.QTS = (self.QMS * self.QES) / (self.QMS + self.QES)
-        
-        # self.CMS = self.VAS / (self.rho * self.c**2 * self.SD**2)
-        # self.RMS = np.sqrt(self.MMS / self.CMS) / self.QMS
-        # self.BL = np.sqrt(self.RE * self.MMS * (2 * np.pi * self.FS)**2 * self.QES)
-        # self.CMES = 1 / ((2 * np.pi * self.FS)**2 * self.MMS)
-        # self.LCES = self.CMES / (self.BL**2)
-        # self.RES = self.BL**2 / self.RE
-        # self.QTS = (self.QMS * self.QES) / (self.QMS + self.QES)
         self.XMAX = xmax
-        
         self.build_system()
 
 
@@ -116,27 +167,25 @@ class ElecDynSpeaker(phsyConst, elecMechTransf):
                     self.Bl.matrix(), 
                     self.m.matrix(w), 
                     self.s.matrix(w), 
-                    self.r.matrix(w), 
-                    self.S.matrix()]
-        sys_matrix = np.eye(2)  # Start mit Identitätsmatrix
-        for mat in matrices:
-            sys_matrix = np.dot(sys_matrix, mat)  # Matrixmultiplikation
-        return sys_matrix
+                    self.r.matrix(w)]
+                    #self.S.matrix()]
+        return multMatrices2x2(matrices)
     
     
     def calculateLoad(self, w):
-        return self.sf.getLoad(w)
+        return self.sf.calculateLoad(w)
     
     
     def calculateImpedance(self, w):
         # transform acoustic imp to mechanical
-        k = w / self.c
-        a = np.sqrt(self.SD/np.pi)      # sqrt? script shows something else but i think it's an error
-        rak = self.SD*self.rho*self.c*(0.006*(k*a)**4)
-        mak = self.rho*(8/3)*a**3
-        mstar = self.MMS + mak
-        rstar = self.RMS + rak
-        imp_mech_ac = 1 / ((1j*w*(mstar/(self.BL)**2))+((1/self.CMS)/(1j*w*(self.BL)**2))+(rstar/(self.BL)**2))
+        # k = w / self.c
+        # a = np.sqrt(self.SD/np.pi)      # sqrt? script shows something else but i think it's an error
+        # rak = self.SD*self.rho*self.c*(0.006*(k*a)**4)
+        # mak = self.rho*(8/3)*a**3
+        # mstar = self.MMS 
+        # rstar = self.RMS 
+        # m* and r* from TSParameters are already the transformed acoustical + mechanical masses and frictions
+        imp_mech_ac = 1 / ((1j*w*(self.MMS/(self.BL)**2))+((1/self.CMS)/(1j*w*(self.BL)**2))+(self.RMS/(self.BL)**2))
         self.imp = imp_mech_ac + self.R.Z + 1/self.L.Z(w) 
         return self.imp
 
@@ -157,29 +206,56 @@ TSParams = {"Qes":0.36, #
             
 
 speaker = ElecDynSpeaker(TSParams, 0.006)
+# enclosure = AcousticVolume(30) # L
+# port = AcousticPort(r=0.07, l=37.5)
+#port_sf = SoundField(BR_Box.port.S)
+BR_Box = PortedBox(30, 0.035, 0.375, type="tube", corr="wall")
+
 
 # frequency responce p_out/p_in with acostical load 
 f = np.logspace(1, 4.4, 20000)
 omegas = f * 2 * np.pi
-pu_unterload = np.empty(np.shape(omegas), dtype=complex)
-p_rel_u = np.empty(np.shape(omegas), dtype=complex)
-imp = np.empty(np.shape(omegas), dtype=complex)
-
+speaker_imp = np.empty(np.shape(omegas), dtype=complex)
+speaker_tf = np.empty(np.shape(omegas), dtype=complex)
+br_tf = np.empty(np.shape(omegas), dtype=complex)
+pu_speaker_front = np.empty(np.shape(omegas), dtype=complex)
+pu_port_out = np.empty(np.shape(omegas), dtype=complex)
+pu = np.empty(np.shape(omegas), dtype=complex)
+sfload = np.empty(np.shape(omegas), dtype=complex)
 for i, w in enumerate(omegas):
-    sys = speaker.calculateSystem(w) 
-    load = speaker.calculateLoad(w)     #  imp = p / v
-    imp[i] = speaker.calculateImpedance(w)
-    pu_unterload[i] = 1 / (sys[0, 0] + sys[0, 1] * load)
-    p_rel_u[i] = 1/sys[0,0] # assuming v = 0
+    speaker_imp[i] = speaker.calculateImpedance(w)
+    speak_sys = speaker.calculateSystem(w) 
+    speaker_load = speaker.calculateLoad(2)
+    speaker_tf[i] = 1/speak_sys[0,0]        # assuming v = 0       # ! check whether i changed that this does not include S mat - for only speaker the excursion of speaker is more interesting. 
     
+    brbox_sys = BR_Box.calculateSystem(w)
+    brbox_load = BR_Box.calculateLoad(w) 
+    br_tf[i] = 1/(brbox_sys[0,0]+ (brbox_sys[0, 1] * (1/brbox_load)))
 
-plt.semilogx(f, 20 * np.log10(abs(pu_unterload)))
+    comb_sys = multMatrices2x2([speak_sys, brbox_sys])
+    pu_speaker_front[i] = 1/(speak_sys[0,0] + (speak_sys[0, 1] * (1/speaker_load)))
+    pu_port_out[i] =  1/(comb_sys[0,0] + (comb_sys[0, 1] * (1/brbox_load)))
+    
+    # speak_front_load = speaker.calculateLoad(w) # speaker front in wall coupled to sound field
+    # brbox_load = BR_Box.calculateLoad(w)        # port opening in wall  coupled to sound field 
+    # #total_load = 1/((1/brbox_load) + (1/speak_front_load))
+    # pu_speaker_front[i] = 1/(speak_sys[0,0] + (speak_sys[0, 1] * (1/speak_front_load)))
+    # pu_port_out[i] =  1/(port_out_sys[0,0] + (port_out_sys[0, 1] * (1/brbox_load)))
+
+# plt.semilogx(f, 20 * np.log10(abs(speaker_tf)), linestyle="-.", color="k", alpha=0.3)
+# plt.semilogx(f, 20 * np.log10(abs(br_tf)), linestyle="-.", color="k", alpha=0.3)
+
+plt.semilogx(f, 20 * np.log10(abs(pu_speaker_front)), linestyle="--", color="k", alpha=0.3)
+plt.semilogx(f, 20 * np.log10(abs(pu_port_out)), linestyle=":", color="k", alpha=0.3)
+plt.semilogx(f, 20 * np.log10(abs(pu_speaker_front+pu_port_out)), linestyle="-", color="k")
+
+#plt.legend(["speaker tf", "front", "port", "total"])
 plt.xlabel("Frequency (Hz)")
 plt.ylabel("Amplitude (dB)")
 plt.grid(True, which="both", linestyle="--")
 plt.show()
 
-plt.semilogx(f, abs(imp))
+plt.semilogx(f, abs(speaker_imp), linestyle="-", color="k",)
 plt.xlabel("Frequency (Hz)")
 plt.ylabel("Impedance")
 plt.grid(True, which="both", linestyle="--")
