@@ -31,26 +31,6 @@ class Zweitor():
             raise ValueError("Ungültiger Typ. Bitte 'laengs' oder 'quer' wählen.")
 
 
-    # def matrix(self, w):
-    #     if self.laengs:
-    #         match self.type:
-    #             case "0100":
-    #                 res = [[1, 1j*w*self.val],[0, 1]]
-    #             case "0200":
-    #                 res = [[1, self.val/(1j*w)],[0, 1]]
-    #             case _:
-    #                 res = np.matrix([[1, self.val], [0, 1]])
-    #     else:
-    #         match self.type:
-    #             case "0010":
-    #                 res = [[1, 0],[(1/self.val)*(1/(1j*w)), 1]] # double inverse due to kehrwert
-    #             case "0020":
-    #                 res = [[1, 0],[(1/self.val)*(1j*w), 1]] # double inverse due to kehrwert
-    #             case _:
-    #                 res = np.matrix([[1, 0], [1/self.val, 1]])
-    #     return res
-
-
 class elecMechTransf():
     def __init__(self, Bl):
         self._val = Bl
@@ -96,26 +76,34 @@ class ElecDynSpeaker(phsyConst, elecMechTransf):
         self.RE = TSParams["Re"]
         self.SD = TSParams["Sd"] * 1e-4 
         self.LE = TSParams["Le"] * 1e-3
-        self.CMS = self.VAS / (self.rho * self.c**2 * self.SD**2)
-        self.RMS = np.sqrt(self.MMS / self.CMS) / self.QMS
-        self.BL = np.sqrt(self.RE * self.MMS * (2 * np.pi * self.FS)**2 * self.QES)
-        self.CMES = 1 / ((2 * np.pi * self.FS)**2 * self.MMS)
-        self.LCES = self.CMES / (self.BL**2)
+        self.RMS = TSParams["Rms"]
+        self.CMS = TSParams["Cms"] * 1e-3
+        self.BL = TSParams["Bl"]
+        
+        self.CMES = self.MMS / (self.BL)**2
+        self.LCES = (self.BL**2) / self.SD
         self.RES = self.BL**2 / self.RE
         self.QTS = (self.QMS * self.QES) / (self.QMS + self.QES)
+        
+        # self.CMS = self.VAS / (self.rho * self.c**2 * self.SD**2)
+        # self.RMS = np.sqrt(self.MMS / self.CMS) / self.QMS
+        # self.BL = np.sqrt(self.RE * self.MMS * (2 * np.pi * self.FS)**2 * self.QES)
+        # self.CMES = 1 / ((2 * np.pi * self.FS)**2 * self.MMS)
+        # self.LCES = self.CMES / (self.BL**2)
+        # self.RES = self.BL**2 / self.RE
+        # self.QTS = (self.QMS * self.QES) / (self.QMS + self.QES)
         self.XMAX = xmax
         
-        w = np.linspace(20, 20000, 19981)
         self.build_system()
 
 
     def build_system(self):
         self.R = Zweitor(self.RE, "laengs")
-        self.L = Zweitor(lambda w: 1j*w*self.LE, "laengs")
+        self.L = Zweitor(lambda w: 1/(1j*w*self.LE), "laengs")
         self.Bl = elecMechTransf(self.BL)
-        self.m = Zweitor(lambda w: 1j*w*self.MMS, "quer")
-        self.s = Zweitor(lambda w: 1/(1j*w*self.CMS), "quer")
-        self.r = Zweitor(self.RMS, "quer")
+        self.m = Zweitor(lambda w: 1/(1j*w*self.MMS), "quer")
+        self.s = Zweitor(lambda w: 1j*w*self.CMS, "quer")
+        self.r = Zweitor(1/self.RMS, "quer")
         self.S = mechAcoustTransf(self.SD)
         self.sf = SoundField(self.SD)
 
@@ -135,8 +123,10 @@ class ElecDynSpeaker(phsyConst, elecMechTransf):
             sys_matrix = np.dot(sys_matrix, mat)  # Matrixmultiplikation
         return sys_matrix
     
+    
     def calculateLoad(self, w):
         return self.sf.getLoad(w)
+    
     
     def calculateImpedance(self, w):
         # transform acoustic imp to mechanical
@@ -147,7 +137,7 @@ class ElecDynSpeaker(phsyConst, elecMechTransf):
         mstar = self.MMS + mak
         rstar = self.RMS + rak
         imp_mech_ac = 1 / ((1j*w*(mstar/(self.BL)**2))+((1/self.CMS)/(1j*w*(self.BL)**2))+(rstar/(self.BL)**2))
-        self.imp = imp_mech_ac + self.R.Z + self.L.Z(w) 
+        self.imp = imp_mech_ac + self.R.Z + 1/self.L.Z(w) 
         return self.imp
 
 
@@ -160,7 +150,11 @@ TSParams = {"Qes":0.36, #
             "Mms":59, # g
             "Re":3.3, # ohm
             "Sd":210, # cm2
-            "Le":0.73}  # mH
+            "Le":0.73,  # mH
+            "Rms":1.3,
+            "Cms":0.59,  # mm/n
+            "Bl":9.6}    # Tm
+            
 
 speaker = ElecDynSpeaker(TSParams, 0.006)
 
@@ -176,7 +170,7 @@ for i, w in enumerate(omegas):
     load = speaker.calculateLoad(w)     #  imp = p / v
     imp[i] = speaker.calculateImpedance(w)
     pu_unterload[i] = 1 / (sys[0, 0] + sys[0, 1] * load)
-    #p_rel_u[i] = 1/sys[0,0] # assuming v = 0
+    p_rel_u[i] = 1/sys[0,0] # assuming v = 0
     
 
 plt.semilogx(f, 20 * np.log10(abs(pu_unterload)))
